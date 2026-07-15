@@ -1,5 +1,6 @@
-streamlit
-opencv-python-headless
+streamlit>=1.50
+opencv-python-headless>=4.9
 numpy
 Pillow
-vtracer
+vtracer>=0.6.11
+ 
