@@ -61,6 +61,28 @@ def xdog_lines(img_bgr, sigma=0.5, k=1.6, gamma=0.98, epsilon=0.1, phi=10):
     return xdog
 
 
+def black_bg_to_white(img_bgr, threshold=30, feather=0):
+    """
+    Detecta píxeles oscuros/negros (fondo) y los convierte a blanco puro,
+    antes de aplicar la conversión a líneas. Útil cuando la imagen original
+    tiene fondo negro y se quiere partir de un fondo blanco limpio.
+    """
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    mask = (gray <= threshold).astype(np.uint8) * 255
+
+    if feather > 0:
+        # Suaviza el borde de la máscara para que la transición no se vea dura
+        k = feather if feather % 2 == 1 else feather + 1
+        mask = cv2.GaussianBlur(mask, (k, k), 0)
+
+    mask_f = mask.astype(np.float32) / 255.0
+    mask_f = mask_f[..., None]  # (H, W, 1) para aplicar a los 3 canales
+
+    white = np.full_like(img_bgr, 255)
+    result = (img_bgr.astype(np.float32) * (1 - mask_f) + white.astype(np.float32) * mask_f)
+    return result.astype(np.uint8)
+
+
 def sharpen_lines(line_img, strength=1.0):
     """Aumenta el contraste de las líneas resultantes."""
     result = cv2.convertScaleAbs(line_img, alpha=1 + strength, beta=0)
@@ -105,6 +127,23 @@ def clean_sharp_lines(line_img, bin_threshold=180, remove_specks=True,
 # ---------- Interfaz ----------
 
 uploaded_file = st.file_uploader("Sube tu imagen", type=["png", "jpg", "jpeg", "webp"])
+
+st.subheader("🎨 Preprocesamiento")
+convertir_fondo_negro = st.checkbox(
+    "Convertir fondo negro a blanco (antes de procesar)", value=False
+)
+
+if convertir_fondo_negro:
+    col_p1, col_p2 = st.columns(2)
+    with col_p1:
+        umbral_negro = st.slider(
+            "Sensibilidad de negro (más alto = detecta más tonos oscuros)",
+            0, 150, 30
+        )
+    with col_p2:
+        suavizado_borde = st.slider(
+            "Suavizar borde de transición (0 = corte duro)", 0, 21, 0, step=1
+        )
 
 col_a, col_b = st.columns(2)
 
@@ -172,6 +211,9 @@ if uploaded_file is not None:
     img_np = np.array(pil_img)
     img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
 
+    if convertir_fondo_negro:
+        img_bgr = black_bg_to_white(img_bgr, threshold=umbral_negro, feather=suavizado_borde)
+
     with st.spinner("Procesando imagen..."):
         if metodo == "Boceto a lápiz (Dodge Blend)":
             result = pencil_sketch(img_bgr, blur_ksize=blur_ksize)
@@ -200,7 +242,12 @@ if uploaded_file is not None:
 
     col1, col2 = st.columns(2)
     with col1:
-        st.image(pil_img, caption="Imagen original", use_container_width=True)
+        preview_img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        caption_original = (
+            "Imagen con fondo convertido a blanco" if convertir_fondo_negro
+            else "Imagen original"
+        )
+        st.image(preview_img, caption=caption_original, use_container_width=True)
     with col2:
         st.image(result, caption="Resultado en líneas", use_container_width=True, clamp=True)
 
