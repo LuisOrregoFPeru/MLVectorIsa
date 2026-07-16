@@ -41,6 +41,8 @@ Fondo oscuro → blanco — convierte tonos negros en blanco (rápido).
 
 Convertir a líneas — elige el estilo: tatuaje/logo, libro para colorear, contornos o lápiz.
 Limpieza final — deja las líneas negras puras y borra los puntitos de ruido.
+Edición manual — corrige el resultado haciendo clic sobre la imagen:
+borrar el trazo que tocas, borrar una zona redonda o dibujar un punto, con zoom, deshacer y restaurar.
 Vectorizar (SVG) — crea un archivo que se agranda sin pixelarse.
 
 
