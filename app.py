@@ -18,46 +18,10 @@ except ImportError:
     REMBG_OK = False
  
 try:
-    # Parche de compatibilidad: las versiones nuevas de Streamlit movieron y
-    # cambiaron 'image_to_url', que streamlit-drawable-canvas todavía necesita.
-    # Reponemos la función registrando la imagen en el gestor de medios de
-    # Streamlit (devuelve una URL /media/... que el lienzo sí puede cargar).
-    import streamlit.elements.image as _st_image_mod
-    if not hasattr(_st_image_mod, "image_to_url"):
-        from PIL import Image as _PILImage
-        from streamlit import runtime as _st_runtime
-        try:
-            from streamlit.runtime import caching as _st_caching
-        except Exception:
-            _st_caching = None
- 
-        def _image_to_url(image, width, clamp, channels, output_format, image_id, **kwargs):
-            if not isinstance(image, _PILImage.Image):
-                image = _PILImage.fromarray(np.asarray(image))
-            if image.mode not in ("RGB", "RGBA"):
-                image = image.convert("RGB")
-            _buf = io.BytesIO()
-            image.save(_buf, format="PNG")
-            _data = _buf.getvalue()
-            _mimetype = "image/png"
-            if _st_runtime.exists():
-                _url = _st_runtime.get_instance().media_file_mgr.add(
-                    _data, _mimetype, image_id
-                )
-                if _st_caching is not None:
-                    try:
-                        _st_caching.save_media_data(_data, _mimetype, image_id)
-                    except Exception:
-                        pass
-                return _url
-            return ""
- 
-        _st_image_mod.image_to_url = _image_to_url
- 
-    from streamlit_drawable_canvas import st_canvas
-    CANVAS_OK = True
-except Exception:
-    CANVAS_OK = False
+    from streamlit_image_coordinates import streamlit_image_coordinates
+    COORDS_OK = True
+except ImportError:
+    COORDS_OK = False
  
  
 st.set_page_config(page_title="Imagen a Líneas", page_icon="🖊️", layout="wide")
@@ -206,6 +170,36 @@ def erase_strokes_at_points(line_img, points_xy, tolerance=8):
             if lbl != 0:
                 edited[labels == lbl] = 255
     return edited
+ 
+ 
+def apply_edit_ops(base_gray, ops):
+    """
+    Aplica sobre la imagen base la lista de ediciones hechas por el usuario.
+    Cada operación tiene coordenadas (en resolución completa) y un tipo:
+      - 'erase_stroke': borra el trazo completo bajo el clic
+      - 'erase_region': borra un círculo (zona)
+      - 'draw_dot': dibuja un punto/mancha negra
+    """
+    if len(base_gray.shape) == 3:
+        img = cv2.cvtColor(base_gray, cv2.COLOR_BGR2GRAY)
+    else:
+        img = base_gray.copy()
+ 
+    for op in ops:
+        x, y = int(op["x"]), int(op["y"])
+        if op["type"] == "erase_stroke":
+            img = erase_strokes_at_points(img, [(x, y)])
+        elif op["type"] == "erase_region":
+            cv2.circle(img, (x, y), int(op.get("r", 25)), 255, -1)
+        elif op["type"] == "draw_dot":
+            cv2.circle(img, (x, y), int(op.get("r", 25)), 0, -1)
+    return img
+ 
+ 
+def vectorize_to_svg(line_img, colormode="binary", mode="spline",
+                     filter_speckle=4, corner_threshold=60,
+                     path_precision=6, length_threshold=4.0, upscale=1):
+    """Convierte las líneas en trazos vectoriales (SVG) que escalan sin pixelarse."""
     if len(line_img.shape) == 2:
         rgb = cv2.cvtColor(line_img, cv2.COLOR_GRAY2RGB)
     else:
@@ -339,52 +333,43 @@ with st.sidebar:
     # ---------- PASO 5: Edición manual ----------
     st.markdown("### 5) Edición manual (borrar a mano)")
     st.caption(
-        "Corrige el resultado borrando líneas o zonas que no quieres. "
-        "Puedes acercar la imagen (zoom) para trabajar con precisión."
+        "Corrige el resultado haciendo clic sobre la imagen: borra líneas o zonas, "
+        "o agrega puntos. Puedes acercar la imagen (zoom) para trabajar con precisión."
     )
  
-    if not CANVAS_OK:
-        st.warning("Falta instalar 'streamlit-drawable-canvas' (agrégalo a requirements.txt).")
+    if not COORDS_OK:
+        st.warning("Falta instalar 'streamlit-image-coordinates' (agrégalo a requirements.txt).")
         edicion_manual = False
     else:
         edicion_manual = st.checkbox("Activar edición manual", value=False)
  
-    if CANVAS_OK and edicion_manual:
+    if COORDS_OK and edicion_manual:
         modo_borrado = st.radio(
-            "¿Qué quieres hacer?",
+            "¿Qué quieres hacer al hacer clic?",
             [
-                "Borrar con brocha",
-                "Borrar trazo con un clic",
-                "Borrar zona (rectángulo)",
-                "Borrar zona (círculo)",
-                "Dibujar / completar líneas",
-                "Dibujar línea recta",
+                "Borrar el trazo que toco",
+                "Borrar una zona redonda",
+                "Dibujar un punto",
             ],
             help=(
-                "BORRAR:\n"
-                "• Borrar con brocha: pintas encima de lo que quieras quitar.\n"
-                "• Borrar trazo con un clic: clic sobre una línea y se borra entera.\n"
-                "• Borrar zona (rectángulo/círculo): dibujas la forma y se borra lo de dentro.\n\n"
-                "DIBUJAR (agregar líneas negras):\n"
-                "• Dibujar / completar líneas: dibujas a mano alzada para rellenar huecos.\n"
-                "• Dibujar línea recta: haces una línea recta de un punto a otro."
+                "• Borrar el trazo que toco: haces clic sobre una línea y se borra "
+                "esa línea completa de una vez.\n"
+                "• Borrar una zona redonda: borras un círculo alrededor de donde haces clic "
+                "(ajusta el tamaño abajo).\n"
+                "• Dibujar un punto: agregas un punto/mancha negra donde haces clic "
+                "(útil para reforzar o completar)."
             )
         )
         zoom = st.slider(
-            "🔍 Zoom (acercar imagen)", 0.5, 3.0, 1.0, step=0.1,
-            help="Agranda la imagen en pantalla para trabajar con más precisión."
+            "🔍 Zoom (acercar imagen)", 0.4, 3.0, 1.0, step=0.1,
+            help="Agranda la imagen en pantalla para hacer clic con más precisión."
         )
-        # Grosor para los modos de brocha / línea (borrar o dibujar)
-        modos_con_grosor = [
-            "Borrar con brocha", "Dibujar / completar líneas", "Dibujar línea recta"
-        ]
-        if modo_borrado in modos_con_grosor:
-            etiqueta = ("Grosor del borrador" if modo_borrado == "Borrar con brocha"
-                        else "Grosor del lápiz")
-            grosor_pincel = st.slider(etiqueta, 1, 60, 15)
-        st.caption(
-            "↩️ Usa los íconos debajo del lienzo para deshacer, rehacer o limpiar todo."
-        )
+        if modo_borrado in ("Borrar una zona redonda", "Dibujar un punto"):
+            radio_pincel = st.slider(
+                "Tamaño del círculo/punto", 3, 120, 25,
+                help="Qué tan grande es la zona que borras o el punto que dibujas."
+            )
+        st.caption("Usa los botones de «Deshacer» y «Restaurar» que aparecen sobre la imagen.")
  
     st.divider()
  
@@ -428,7 +413,7 @@ if uploaded_file is None:
         "2. Limpia el fondo (la IA es la opción más cómoda).\n"
         "3. Elige el estilo de líneas.\n"
         "4. Deja la limpieza nítida activada.\n"
-        "5. Si quieres, borra a mano líneas o zonas que no te gusten (con zoom y clic).\n"
+        "5. Si quieres, corrige a mano haciendo clic sobre la imagen (borrar o dibujar, con zoom).\n"
         "6. Si quieres un archivo escalable, activa la vectorización.\n\n"
         "Los resultados aparecerán aquí a la derecha y podrás descargarlos."
     )
@@ -474,120 +459,76 @@ else:
     with col2:
         st.image(result, caption="Dibujo de líneas", width="stretch", clamp=True)
  
-    # ---------- Paso 5: Edición manual con lienzo interactivo ----------
-    if CANVAS_OK and edicion_manual:
+    # ---------- Paso 5: Edición manual por clics ----------
+    if COORDS_OK and edicion_manual:
         st.divider()
         st.subheader("✏️ Edición manual")
         st.caption(
-            "Dibuja o borra directamente sobre la imagen de abajo. Todo lo que "
-            "hagas aquí se aplica también a la descarga y al vector."
+            "Haz clic sobre la imagen para editar. Cada clic aplica la acción elegida "
+            "a la izquierda. Todo lo que edites se usa también en la descarga y el vector."
         )
  
-        # Botón para restaurar la imagen original (borra todos los cambios manuales)
-        if "canvas_ver" not in st.session_state:
-            st.session_state.canvas_ver = 0
-        col_r1, col_r2 = st.columns([1, 3])
-        with col_r1:
-            if st.button("🔄 Restaurar original",
-                         help="Borra TODOS los cambios manuales y vuelve a la imagen sin editar."):
-                st.session_state.canvas_ver += 1
+        # Guardar la lista de ediciones entre clics
+        if "edit_ops" not in st.session_state:
+            st.session_state.edit_ops = []
+        if "last_click" not in st.session_state:
+            st.session_state.last_click = None
+ 
+        # Botones de deshacer / restaurar
+        col_e1, col_e2, col_e3 = st.columns([1, 1, 3])
+        with col_e1:
+            if st.button("↩️ Deshacer"):
+                if st.session_state.edit_ops:
+                    st.session_state.edit_ops.pop()
+                st.session_state.last_click = None
                 st.rerun()
-        with col_r2:
-            st.caption(
-                "El botón de la papelera 🗑️ (debajo del lienzo) también borra los "
-                "trazos. Para revertir todo de golpe, usa «Restaurar original»."
-            )
+        with col_e2:
+            if st.button("🔄 Restaurar"):
+                st.session_state.edit_ops = []
+                st.session_state.last_click = None
+                st.rerun()
+        with col_e3:
+            n_ops = len(st.session_state.edit_ops)
+            st.caption(f"Cambios aplicados: {n_ops}. «Deshacer» quita el último; "
+                       "«Restaurar» vuelve a la imagen original.")
  
-        # Preparar imagen base en RGB para el lienzo
-        if len(result.shape) == 2:
-            base_rgb = cv2.cvtColor(result, cv2.COLOR_GRAY2RGB)
-        else:
-            base_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
-        h0, w0 = base_rgb.shape[:2]
+        # Base en gris + aplicar las ediciones acumuladas
+        base_gray = result if len(result.shape) == 2 else cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+        edited = apply_edit_ops(base_gray, st.session_state.edit_ops)
+        h0, w0 = edited.shape[:2]
  
-        # Tamaño de visualización según zoom (con un límite para no saturar)
+        # Tamaño de visualización según zoom
         base_fit = min(w0, 700)
-        disp_w = int(min(base_fit * zoom, 1400))
-        disp_h = int(disp_w * h0 / w0)
-        base_disp = cv2.resize(base_rgb, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
-        base_pil = Image.fromarray(base_disp)
+        disp_w = int(min(base_fit * zoom, 1600))
+        disp_h = max(1, int(disp_w * h0 / w0))
+        edited_rgb = cv2.cvtColor(edited, cv2.COLOR_GRAY2RGB)
+        edited_disp = cv2.resize(edited_rgb, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
+        edited_pil = Image.fromarray(edited_disp)
  
-        # Configurar el modo del lienzo según la acción elegida
-        # Negro = dibujar/agregar línea ; Blanco = borrar
-        NEGRO = "rgba(0,0,0,1)"
-        BLANCO = "rgba(255,255,255,1)"
+        st.caption("👇 Haz clic sobre la imagen:")
+        click = streamlit_image_coordinates(edited_pil, key="editor_clicks")
  
-        grosor = globals().get("grosor_pincel", 15)
+        # Procesar un clic nuevo
+        if click is not None and click != st.session_state.last_click:
+            st.session_state.last_click = click
+            # Mapear coordenadas de la imagen mostrada a la resolución completa
+            fx = w0 / disp_w
+            fy = h0 / disp_h
+            x_full = click["x"] * fx
+            y_full = click["y"] * fy
  
-        if modo_borrado == "Borrar con brocha":
-            drawing_mode, stroke_color, fill_color, stroke_w = "freedraw", BLANCO, BLANCO, grosor
-        elif modo_borrado == "Borrar zona (rectángulo)":
-            drawing_mode, stroke_color, fill_color, stroke_w = "rect", BLANCO, BLANCO, 2
-        elif modo_borrado == "Borrar zona (círculo)":
-            drawing_mode, stroke_color, fill_color, stroke_w = "circle", BLANCO, BLANCO, 2
-        elif modo_borrado == "Dibujar / completar líneas":
-            drawing_mode, stroke_color, fill_color, stroke_w = "freedraw", NEGRO, NEGRO, grosor
-        elif modo_borrado == "Dibujar línea recta":
-            drawing_mode, stroke_color, fill_color, stroke_w = "line", NEGRO, NEGRO, grosor
-        else:  # Borrar trazo con un clic
-            drawing_mode, stroke_color, fill_color, stroke_w = "point", BLANCO, BLANCO, 3
+            radio = globals().get("radio_pincel", 25)
+            if modo_borrado == "Borrar el trazo que toco":
+                op = {"type": "erase_stroke", "x": x_full, "y": y_full}
+            elif modo_borrado == "Borrar una zona redonda":
+                op = {"type": "erase_region", "x": x_full, "y": y_full, "r": radio}
+            else:  # Dibujar un punto
+                op = {"type": "draw_dot", "x": x_full, "y": y_full, "r": radio}
  
-        canvas_result = st_canvas(
-            fill_color=fill_color,
-            stroke_color=stroke_color,
-            stroke_width=stroke_w,
-            background_image=base_pil,
-            update_streamlit=True,
-            height=disp_h,
-            width=disp_w,
-            drawing_mode=drawing_mode,
-            point_display_radius=4 if drawing_mode == "point" else 0,
-            display_toolbar=True,
-            key=f"lienzo_edicion_{st.session_state.canvas_ver}",
-        )
- 
-        # Aplicar los cambios sobre el resultado a resolución completa
-        edited = result.copy()
-        scale_x = w0 / disp_w
-        scale_y = h0 / disp_h
- 
-        if drawing_mode == "point":
-            # Borrar trazos completos en cada punto donde se hizo clic
-            puntos = []
-            if canvas_result.json_data is not None:
-                for obj in canvas_result.json_data.get("objects", []):
-                    left = obj.get("left", 0)
-                    top = obj.get("top", 0)
-                    radius = obj.get("radius", 0)
-                    cx = (left + radius) * scale_x
-                    cy = (top + radius) * scale_y
-                    puntos.append((cx, cy))
-            if puntos:
-                edited = erase_strokes_at_points(edited, puntos)
-        else:
-            # Para dibujar/borrar: leemos lo pintado y decidimos por el COLOR
-            # (blanco = borrar -> pixel blanco ; negro = dibujar -> pixel negro)
-            if canvas_result.image_data is not None:
-                overlay = canvas_result.image_data  # RGBA en tamaño de display
-                alpha = overlay[:, :, 3]
-                drawn = alpha > 0
-                brillo = overlay[:, :, :3].mean(axis=2)
-                borrar_mask = (drawn & (brillo > 128)).astype(np.uint8) * 255
-                dibujar_mask = (drawn & (brillo <= 128)).astype(np.uint8) * 255
- 
-                borrar_full = cv2.resize(borrar_mask, (w0, h0), interpolation=cv2.INTER_NEAREST)
-                dibujar_full = cv2.resize(dibujar_mask, (w0, h0), interpolation=cv2.INTER_NEAREST)
- 
-                if len(edited.shape) == 2:
-                    edited[borrar_full > 0] = 255
-                    edited[dibujar_full > 0] = 0
-                else:
-                    edited[borrar_full > 0] = (255, 255, 255)
-                    edited[dibujar_full > 0] = (0, 0, 0)
+            st.session_state.edit_ops.append(op)
+            st.rerun()
  
         result = edited  # todo lo de abajo usa la versión editada
- 
-        st.image(result, caption="Resultado editado", width="stretch", clamp=True)
  
     st.divider()
     # Descargar PNG
@@ -622,4 +563,3 @@ else:
                                    mime="image/svg+xml")
             except Exception as e:
                 st.error(f"No se pudo vectorizar: {e}")
- 
