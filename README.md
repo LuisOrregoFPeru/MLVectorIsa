@@ -1,63 +1,58 @@
-# 🖊️ Imagen a Líneas — Convertidor con Streamlit
+🖊️ Imagen a Líneas — Convertidor con Streamlit
 
-App para convertir cualquier imagen a color en un dibujo de líneas (line art),
-con opción de **vectorización a SVG** para escalar sin pixelarse.
-Útil para lograr un estilo tipo logo/tatuaje, libro para colorear, corte láser o vinilo.
+App para convertir fotos o diseños a color en dibujos de líneas limpios,
+con remoción de fondo por IA y vectorización a SVG.
+Ideal para logos, tatuajes, libros para colorear, impresión en grande o corte en vinilo.
 
-## 📁 Archivos
+📁 Archivos
 
-- `app.py` — Código de la aplicación Streamlit.
-- `requirements.txt` — Dependencias necesarias.
 
-## 🚀 Cómo correrla en local
+app.py — Aplicación Streamlit (herramientas en la barra izquierda, resultado a la derecha).
+requirements.txt — Dependencias.
 
-```bash
-pip install -r requirements.txt
+
+🚀 Correr en local
+
+bashpip install -r requirements.txt
 streamlit run app.py
-```
 
-Luego abre el navegador en `http://localhost:8501`.
+☁️ Desplegar en Streamlit Community Cloud
 
-## ☁️ Cómo desplegarla en Streamlit Community Cloud (gratis)
 
-1. Crea un repositorio en GitHub y sube estos archivos (`app.py` y `requirements.txt`).
-2. Ve a [share.streamlit.io](https://share.streamlit.io) e inicia sesión con tu cuenta de GitHub.
-3. Haz clic en **"New app"**.
-4. Selecciona tu repositorio, la rama (`main`) y el archivo principal: `app.py`.
-5. Haz clic en **"Deploy"**. En un par de minutos tendrás tu URL pública.
+Sube app.py y requirements.txt a un repo de GitHub.
+En share.streamlit.io → New app → elige el repo y app.py.
+IMPORTANTE: en Advanced settings, selecciona Python 3.12
+(la versión 3.14 causa un error de tipo Segmentation fault con estas librerías).
+Deploy.
 
-## 🎛️ Funciones incluidas
 
-### Preprocesamiento
-- **Convertir fondo negro a blanco** antes de procesar (con sensibilidad y suavizado ajustables).
+Si ya tienes la app desplegada: menú (⋮) → Settings → cambia Python version a 3.12.
 
-### Métodos de conversión a líneas
-| Método | Resultado |
-|---|---|
-| Boceto a lápiz (Dodge Blend) | Líneas suaves con sombreado, estilo dibujo a mano |
-| Bordes Canny | Contornos definidos, buen detalle de bordes |
-| Umbral Adaptativo | Líneas gruesas, estilo libro para colorear |
-| XDoG | Líneas tipo logo/tatuaje (recomendado para diseños como el del dragón) |
+🧰 Herramientas incluidas (en lenguaje sencillo)
 
-### Modo Nítido
-Convierte a blanco y negro puro, elimina manchas de ruido y cierra micro-huecos.
 
-### 🔷 Vectorización avanzada (SVG)
-Usa **vtracer** para convertir las líneas raster en trazos vectoriales:
-- Modo binario (blanco/negro) o color.
-- Trazos tipo spline (curvas suaves), polígono (rectas) o pixelado.
-- Controles de filtrado de manchas, suavidad de esquinas y ampliación previa.
-- Descarga en `.svg` editable en Illustrator / Inkscape, escalable a cualquier tamaño.
+Subir imagen — tu foto o diseño de partida.
+Limpiar el fondo:
 
-## 🛠️ Requisitos
+Quitar fondo con IA — un modelo inteligente reconoce tu figura y borra lo de atrás.
+Fondo oscuro → blanco — convierte tonos negros en blanco (rápido).
 
-- Python 3.9+
-- Ver `requirements.txt` para las librerías exactas.
 
-## 💡 Flujo recomendado (para diseños tipo logo/tatuaje)
 
-1. Activa "Convertir fondo negro a blanco" (sensibilidad 40–60).
-2. Método **XDoG**.
-3. Activa **Modo Nítido** (umbral 150–190).
-4. Activa **Vectorización SVG** (modo binario, spline, ampliar x2).
-5. Descarga el SVG.
+Convertir a líneas — elige el estilo: tatuaje/logo, libro para colorear, contornos o lápiz.
+Limpieza final — deja las líneas negras puras y borra los puntitos de ruido.
+Vectorizar (SVG) — crea un archivo que se agranda sin pixelarse.
+
+
+🛠️ Requisitos
+
+
+Python 3.12 (recomendado)
+Ver requirements.txt.
+
+
+⚠️ Notas
+
+
+La primera vez que uses "Quitar fondo con IA", la app descarga el modelo (~176 MB); tarda un poco solo esa vez.
+El SVG a color puede pesar varios MB; usa modo "Blanco y negro" para archivos más livianos.
