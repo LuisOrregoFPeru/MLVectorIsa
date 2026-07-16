@@ -479,9 +479,24 @@ else:
         st.divider()
         st.subheader("✏️ Edición manual")
         st.caption(
-            "Trabaja sobre el lienzo de abajo. Lo que borres aquí se usará también "
-            "para la descarga y el vector."
+            "Dibuja o borra directamente sobre la imagen de abajo. Todo lo que "
+            "hagas aquí se aplica también a la descarga y al vector."
         )
+ 
+        # Botón para restaurar la imagen original (borra todos los cambios manuales)
+        if "canvas_ver" not in st.session_state:
+            st.session_state.canvas_ver = 0
+        col_r1, col_r2 = st.columns([1, 3])
+        with col_r1:
+            if st.button("🔄 Restaurar original",
+                         help="Borra TODOS los cambios manuales y vuelve a la imagen sin editar."):
+                st.session_state.canvas_ver += 1
+                st.rerun()
+        with col_r2:
+            st.caption(
+                "El botón de la papelera 🗑️ (debajo del lienzo) también borra los "
+                "trazos. Para revertir todo de golpe, usa «Restaurar original»."
+            )
  
         # Preparar imagen base en RGB para el lienzo
         if len(result.shape) == 2:
@@ -528,7 +543,7 @@ else:
             drawing_mode=drawing_mode,
             point_display_radius=4 if drawing_mode == "point" else 0,
             display_toolbar=True,
-            key="lienzo_edicion",
+            key=f"lienzo_edicion_{st.session_state.canvas_ver}",
         )
  
         # Aplicar los cambios sobre el resultado a resolución completa
@@ -607,3 +622,4 @@ else:
                                    mime="image/svg+xml")
             except Exception as e:
                 st.error(f"No se pudo vectorizar: {e}")
+ 
