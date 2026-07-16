@@ -20,11 +20,16 @@ except ImportError:
 try:
     # Parche de compatibilidad: las versiones nuevas de Streamlit movieron y
     # cambiaron 'image_to_url', que streamlit-drawable-canvas todavía necesita.
-    # Reponemos la función con su comportamiento antiguo (devuelve un data URL).
+    # Reponemos la función registrando la imagen en el gestor de medios de
+    # Streamlit (devuelve una URL /media/... que el lienzo sí puede cargar).
     import streamlit.elements.image as _st_image_mod
     if not hasattr(_st_image_mod, "image_to_url"):
-        import base64 as _b64
         from PIL import Image as _PILImage
+        from streamlit import runtime as _st_runtime
+        try:
+            from streamlit.runtime import caching as _st_caching
+        except Exception:
+            _st_caching = None
  
         def _image_to_url(image, width, clamp, channels, output_format, image_id, **kwargs):
             if not isinstance(image, _PILImage.Image):
@@ -33,8 +38,19 @@ try:
                 image = image.convert("RGB")
             _buf = io.BytesIO()
             image.save(_buf, format="PNG")
-            _b64str = _b64.b64encode(_buf.getvalue()).decode()
-            return f"data:image/png;base64,{_b64str}"
+            _data = _buf.getvalue()
+            _mimetype = "image/png"
+            if _st_runtime.exists():
+                _url = _st_runtime.get_instance().media_file_mgr.add(
+                    _data, _mimetype, image_id
+                )
+                if _st_caching is not None:
+                    try:
+                        _st_caching.save_media_data(_data, _mimetype, image_id)
+                    except Exception:
+                        pass
+                return _url
+            return ""
  
         _st_image_mod.image_to_url = _image_to_url
  
@@ -335,22 +351,37 @@ with st.sidebar:
  
     if CANVAS_OK and edicion_manual:
         modo_borrado = st.radio(
-            "¿Cómo quieres borrar?",
-            ["Brocha (pintar encima)", "Borrar trazo con un clic", "Borrar zona (rectángulo)"],
+            "¿Qué quieres hacer?",
+            [
+                "Borrar con brocha",
+                "Borrar trazo con un clic",
+                "Borrar zona (rectángulo)",
+                "Borrar zona (círculo)",
+                "Dibujar / completar líneas",
+                "Dibujar línea recta",
+            ],
             help=(
-                "• Brocha: pintas con el mouse encima de lo que quieras borrar "
-                "(como un borrador). Ajusta el grosor abajo.\n"
-                "• Borrar trazo con un clic: haces clic sobre una línea y se borra "
-                "esa línea completa de una vez.\n"
-                "• Borrar zona: dibujas un rectángulo y se borra todo lo que quede dentro."
+                "BORRAR:\n"
+                "• Borrar con brocha: pintas encima de lo que quieras quitar.\n"
+                "• Borrar trazo con un clic: clic sobre una línea y se borra entera.\n"
+                "• Borrar zona (rectángulo/círculo): dibujas la forma y se borra lo de dentro.\n\n"
+                "DIBUJAR (agregar líneas negras):\n"
+                "• Dibujar / completar líneas: dibujas a mano alzada para rellenar huecos.\n"
+                "• Dibujar línea recta: haces una línea recta de un punto a otro."
             )
         )
         zoom = st.slider(
             "🔍 Zoom (acercar imagen)", 0.5, 3.0, 1.0, step=0.1,
-            help="Agranda la imagen en pantalla para poder borrar con más precisión."
+            help="Agranda la imagen en pantalla para trabajar con más precisión."
         )
-        if modo_borrado == "Brocha (pintar encima)":
-            grosor_borrador = st.slider("Grosor del borrador", 3, 60, 20)
+        # Grosor para los modos de brocha / línea (borrar o dibujar)
+        modos_con_grosor = [
+            "Borrar con brocha", "Dibujar / completar líneas", "Dibujar línea recta"
+        ]
+        if modo_borrado in modos_con_grosor:
+            etiqueta = ("Grosor del borrador" if modo_borrado == "Borrar con brocha"
+                        else "Grosor del lápiz")
+            grosor_pincel = st.slider(etiqueta, 1, 60, 15)
         st.caption(
             "↩️ Usa los íconos debajo del lienzo para deshacer, rehacer o limpiar todo."
         )
@@ -466,20 +497,29 @@ else:
         base_disp = cv2.resize(base_rgb, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
         base_pil = Image.fromarray(base_disp)
  
-        # Configurar el modo del lienzo
-        if modo_borrado == "Brocha (pintar encima)":
-            drawing_mode = "freedraw"
-            stroke_w = grosor_borrador
+        # Configurar el modo del lienzo según la acción elegida
+        # Negro = dibujar/agregar línea ; Blanco = borrar
+        NEGRO = "rgba(0,0,0,1)"
+        BLANCO = "rgba(255,255,255,1)"
+ 
+        grosor = globals().get("grosor_pincel", 15)
+ 
+        if modo_borrado == "Borrar con brocha":
+            drawing_mode, stroke_color, fill_color, stroke_w = "freedraw", BLANCO, BLANCO, grosor
         elif modo_borrado == "Borrar zona (rectángulo)":
-            drawing_mode = "rect"
-            stroke_w = 2
+            drawing_mode, stroke_color, fill_color, stroke_w = "rect", BLANCO, BLANCO, 2
+        elif modo_borrado == "Borrar zona (círculo)":
+            drawing_mode, stroke_color, fill_color, stroke_w = "circle", BLANCO, BLANCO, 2
+        elif modo_borrado == "Dibujar / completar líneas":
+            drawing_mode, stroke_color, fill_color, stroke_w = "freedraw", NEGRO, NEGRO, grosor
+        elif modo_borrado == "Dibujar línea recta":
+            drawing_mode, stroke_color, fill_color, stroke_w = "line", NEGRO, NEGRO, grosor
         else:  # Borrar trazo con un clic
-            drawing_mode = "point"
-            stroke_w = 3
+            drawing_mode, stroke_color, fill_color, stroke_w = "point", BLANCO, BLANCO, 3
  
         canvas_result = st_canvas(
-            fill_color="rgba(255,255,255,1)",   # blanco = borrar
-            stroke_color="rgba(255,255,255,1)", # blanco
+            fill_color=fill_color,
+            stroke_color=stroke_color,
             stroke_width=stroke_w,
             background_image=base_pil,
             update_streamlit=True,
@@ -491,7 +531,7 @@ else:
             key="lienzo_edicion",
         )
  
-        # Aplicar el borrado sobre el resultado a resolución completa
+        # Aplicar los cambios sobre el resultado a resolución completa
         edited = result.copy()
         scale_x = w0 / disp_w
         scale_y = h0 / disp_h
@@ -510,16 +550,25 @@ else:
             if puntos:
                 edited = erase_strokes_at_points(edited, puntos)
         else:
-            # Brocha o rectángulo: usar lo pintado como máscara de borrado
+            # Para dibujar/borrar: leemos lo pintado y decidimos por el COLOR
+            # (blanco = borrar -> pixel blanco ; negro = dibujar -> pixel negro)
             if canvas_result.image_data is not None:
                 overlay = canvas_result.image_data  # RGBA en tamaño de display
                 alpha = overlay[:, :, 3]
-                mask = (alpha > 0).astype(np.uint8) * 255
-                mask_full = cv2.resize(mask, (w0, h0), interpolation=cv2.INTER_NEAREST)
+                drawn = alpha > 0
+                brillo = overlay[:, :, :3].mean(axis=2)
+                borrar_mask = (drawn & (brillo > 128)).astype(np.uint8) * 255
+                dibujar_mask = (drawn & (brillo <= 128)).astype(np.uint8) * 255
+ 
+                borrar_full = cv2.resize(borrar_mask, (w0, h0), interpolation=cv2.INTER_NEAREST)
+                dibujar_full = cv2.resize(dibujar_mask, (w0, h0), interpolation=cv2.INTER_NEAREST)
+ 
                 if len(edited.shape) == 2:
-                    edited[mask_full > 0] = 255
+                    edited[borrar_full > 0] = 255
+                    edited[dibujar_full > 0] = 0
                 else:
-                    edited[mask_full > 0] = (255, 255, 255)
+                    edited[borrar_full > 0] = (255, 255, 255)
+                    edited[dibujar_full > 0] = (0, 0, 0)
  
         result = edited  # todo lo de abajo usa la versión editada
  
