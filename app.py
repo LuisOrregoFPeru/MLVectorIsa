@@ -18,9 +18,29 @@ except ImportError:
     REMBG_OK = False
  
 try:
+    # Parche de compatibilidad: las versiones nuevas de Streamlit movieron y
+    # cambiaron 'image_to_url', que streamlit-drawable-canvas todavía necesita.
+    # Reponemos la función con su comportamiento antiguo (devuelve un data URL).
+    import streamlit.elements.image as _st_image_mod
+    if not hasattr(_st_image_mod, "image_to_url"):
+        import base64 as _b64
+        from PIL import Image as _PILImage
+ 
+        def _image_to_url(image, width, clamp, channels, output_format, image_id, **kwargs):
+            if not isinstance(image, _PILImage.Image):
+                image = _PILImage.fromarray(np.asarray(image))
+            if image.mode not in ("RGB", "RGBA"):
+                image = image.convert("RGB")
+            _buf = io.BytesIO()
+            image.save(_buf, format="PNG")
+            _b64str = _b64.b64encode(_buf.getvalue()).decode()
+            return f"data:image/png;base64,{_b64str}"
+ 
+        _st_image_mod.image_to_url = _image_to_url
+ 
     from streamlit_drawable_canvas import st_canvas
     CANVAS_OK = True
-except ImportError:
+except Exception:
     CANVAS_OK = False
  
  
