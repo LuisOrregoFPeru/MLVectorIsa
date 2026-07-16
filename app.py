@@ -4,319 +4,402 @@ import cv2
 from PIL import Image
 import io
  
+# ---------- Librerías opcionales (IA y vectorización) ----------
 try:
     import vtracer
     VTRACER_OK = True
 except ImportError:
     VTRACER_OK = False
  
+try:
+    from rembg import remove, new_session
+    REMBG_OK = True
+except ImportError:
+    REMBG_OK = False
+ 
+try:
+    from streamlit_drawable_canvas import st_canvas
+    CANVAS_OK = True
+except ImportError:
+    CANVAS_OK = False
+ 
+ 
 st.set_page_config(page_title="Imagen a Líneas", page_icon="🖊️", layout="wide")
  
-st.title("🖊️ Convertidor de Imagen a Dibujo de Líneas")
-st.caption("Sube una imagen a color y conviértela en line art / dibujo para colorear")
+st.title("🖊️ Convertidor de Imagen a Líneas")
+st.caption(
+    "Sube una foto o diseño a color y conviértelo en un dibujo de líneas limpio, "
+    "listo para colorear, imprimir en grande o usar como logo/tatuaje."
+)
  
-# ---------- Funciones de conversión ----------
+ 
+# ============================================================
+#   FUNCIONES DE PROCESAMIENTO
+# ============================================================
+ 
+@st.cache_resource(show_spinner=False)
+def get_rembg_session(model_name="u2net"):
+    """Carga (una sola vez) el modelo de IA para remover fondos."""
+    return new_session(model_name)
+ 
+ 
+def ai_remove_background(img_bgr, model_name="u2net", bg_color=(255, 255, 255)):
+    """Usa IA para separar la figura del fondo y pintar el fondo de un color."""
+    rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(rgb)
+    session = get_rembg_session(model_name)
+    cut = remove(pil_img, session=session)  # RGBA con fondo transparente
+    bg = Image.new("RGBA", cut.size, bg_color + (255,))
+    composed = Image.alpha_composite(bg, cut).convert("RGB")
+    result_rgb = np.array(composed)
+    return cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
+ 
+ 
+def black_bg_to_white(img_bgr, threshold=30, feather=0):
+    """Convierte los tonos oscuros (fondo negro) en blanco puro."""
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    mask = (gray <= threshold).astype(np.uint8) * 255
+    if feather > 0:
+        k = feather if feather % 2 == 1 else feather + 1
+        mask = cv2.GaussianBlur(mask, (k, k), 0)
+    mask_f = mask.astype(np.float32) / 255.0
+    mask_f = mask_f[..., None]
+    white = np.full_like(img_bgr, 255)
+    result = (img_bgr.astype(np.float32) * (1 - mask_f) +
+              white.astype(np.float32) * mask_f)
+    return result.astype(np.uint8)
+ 
  
 def pencil_sketch(img_bgr, blur_ksize=21, sigma=0):
-    """Método clásico 'dodge blend' -> boceto a lápiz / line art suave."""
+    """Boceto a lápiz (líneas suaves con sombreado)."""
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     inverted = 255 - gray
     blurred = cv2.GaussianBlur(inverted, (blur_ksize, blur_ksize), sigma)
     inverted_blur = 255 - blurred
-    # Evitar división por cero
-    sketch = cv2.divide(gray, inverted_blur, scale=256.0)
-    return sketch
+    return cv2.divide(gray, inverted_blur, scale=256.0)
  
  
 def canny_lines(img_bgr, low_thresh=50, high_thresh=150, blur_ksize=5):
+    """Detección de bordes clásica (contornos definidos)."""
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (blur_ksize, blur_ksize), 0)
     edges = cv2.Canny(blurred, low_thresh, high_thresh)
-    # Invertir para que las líneas sean negras sobre fondo blanco
-    lines = 255 - edges
-    return lines
+    return 255 - edges
  
  
 def adaptive_threshold_lines(img_bgr, block_size=9, c_value=7, blur_ksize=5):
+    """Líneas gruesas estilo libro para colorear."""
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     blurred = cv2.medianBlur(gray, blur_ksize)
     if block_size % 2 == 0:
-        block_size += 1  # debe ser impar
-    edges = cv2.adaptiveThreshold(
-        blurred, 255,
-        cv2.ADAPTIVE_THRESH_MEAN_C,
-        cv2.THRESH_BINARY,
-        block_size, c_value
+        block_size += 1
+    return cv2.adaptiveThreshold(
+        blurred, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+        cv2.THRESH_BINARY, block_size, c_value
     )
-    return edges
  
  
 def xdog_lines(img_bgr, sigma=0.5, k=1.6, gamma=0.98, epsilon=0.1, phi=10):
-    """Método XDoG: líneas más artísticas, similar a comic/tattoo linework."""
+    """Líneas artísticas estilo logo/tatuaje."""
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
     g1 = cv2.GaussianBlur(gray, (0, 0), sigma)
     g2 = cv2.GaussianBlur(gray, (0, 0), sigma * k)
     diff = g1 - gamma * g2
- 
-    xdog = np.where(
-        diff >= epsilon,
-        1.0,
-        1.0 + np.tanh(phi * diff)
-    )
-    xdog = (np.clip(xdog, 0, 1) * 255).astype(np.uint8)
-    return xdog
- 
- 
-def black_bg_to_white(img_bgr, threshold=30, feather=0):
-    """
-    Detecta píxeles oscuros/negros (fondo) y los convierte a blanco puro,
-    antes de aplicar la conversión a líneas. Útil cuando la imagen original
-    tiene fondo negro y se quiere partir de un fondo blanco limpio.
-    """
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    mask = (gray <= threshold).astype(np.uint8) * 255
- 
-    if feather > 0:
-        # Suaviza el borde de la máscara para que la transición no se vea dura
-        k = feather if feather % 2 == 1 else feather + 1
-        mask = cv2.GaussianBlur(mask, (k, k), 0)
- 
-    mask_f = mask.astype(np.float32) / 255.0
-    mask_f = mask_f[..., None]  # (H, W, 1) para aplicar a los 3 canales
- 
-    white = np.full_like(img_bgr, 255)
-    result = (img_bgr.astype(np.float32) * (1 - mask_f) + white.astype(np.float32) * mask_f)
-    return result.astype(np.uint8)
+    xdog = np.where(diff >= epsilon, 1.0, 1.0 + np.tanh(phi * diff))
+    return (np.clip(xdog, 0, 1) * 255).astype(np.uint8)
  
  
 def sharpen_lines(line_img, strength=1.0):
-    """Aumenta el contraste de las líneas resultantes."""
-    result = cv2.convertScaleAbs(line_img, alpha=1 + strength, beta=0)
-    return result
+    return cv2.convertScaleAbs(line_img, alpha=1 + strength, beta=0)
  
  
 def clean_sharp_lines(line_img, bin_threshold=180, remove_specks=True,
-                       min_speck_size=15, close_gaps=True, close_ksize=2):
-    """
-    Convierte una imagen de líneas (con grises/ruido) en blanco y negro puro,
-    nítido, sin manchas sueltas. Ideal para lograr el look tipo 'coloring book'.
-    """
+                      min_speck_size=15, close_gaps=True, close_ksize=2):
+    """Deja blanco y negro puro y elimina manchas de ruido."""
     img = line_img.copy()
- 
-    # 1. Binarización dura: todo pixel queda 0 (negro) o 255 (blanco), sin grises
     _, binary = cv2.threshold(img, bin_threshold, 255, cv2.THRESH_BINARY)
- 
-    # 2. Cerrar pequeños huecos en las líneas (líneas más continuas y limpias)
     if close_ksize > 0 and close_gaps:
-        # Trabajamos sobre las líneas en negro -> invertimos para usar operaciones morfológicas
         inverted = 255 - binary
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_ksize, close_ksize))
         inverted = cv2.morphologyEx(inverted, cv2.MORPH_CLOSE, kernel)
         binary = 255 - inverted
- 
-    # 3. Eliminar manchas/puntitos de ruido sueltos (componentes pequeños)
     if remove_specks:
-        inverted = 255 - binary  # líneas = blanco (255) sobre fondo negro (0)
+        inverted = 255 - binary
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-            inverted, connectivity=8
-        )
+            inverted, connectivity=8)
         clean_inverted = np.zeros_like(inverted)
-        for label_id in range(1, num_labels):  # 0 es el fondo
-            area = stats[label_id, cv2.CC_STAT_AREA]
-            if area >= min_speck_size:
+        for label_id in range(1, num_labels):
+            if stats[label_id, cv2.CC_STAT_AREA] >= min_speck_size:
                 clean_inverted[labels == label_id] = 255
         binary = 255 - clean_inverted
- 
     return binary
  
  
-def vectorize_to_svg(line_img, colormode="binary", mode="spline",
-                     filter_speckle=4, corner_threshold=60,
-                     path_precision=6, length_threshold=4.0,
-                     upscale=1):
+def erase_strokes_at_points(line_img, points_xy, tolerance=8):
     """
-    Vectoriza una imagen de líneas (raster) a SVG usando vtracer.
-    Devuelve el string SVG. El SVG escala sin pixelarse.
+    Borra el trazo (línea) completo que está debajo de cada punto donde el
+    usuario hizo clic. Usa 'componentes conectados': entiende qué píxeles
+    forman una misma línea y la borra entera.
+    'points_xy' son coordenadas (x, y) en la resolución de 'line_img'.
+    """
+    if len(line_img.shape) == 3:
+        gray = cv2.cvtColor(line_img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = line_img.copy()
  
-    - colormode: 'binary' (blanco/negro) o 'color'.
-    - mode: 'spline' (curvas suaves), 'polygon' (rectas), 'none' (píxel).
-    - filter_speckle: elimina manchas menores a este tamaño.
-    - corner_threshold: ángulo para detectar esquinas (más alto = más suave).
-    - path_precision: decimales de precisión de los trazos.
-    - length_threshold: descarta segmentos muy cortos.
-    - upscale: factor de ampliación previo (mejora el detalle del trazado).
-    """
-    # Asegurar 3 canales (vtracer trabaja sobre imagen tipo PNG)
+    # Binarizamos para identificar las líneas (negro) sobre el fondo (blanco)
+    _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+    inv = 255 - binary  # ahora las líneas valen 255
+    num, labels = cv2.connectedComponents(inv, connectivity=8)
+ 
+    ys, xs = np.where(inv > 0)
+    if len(xs) == 0:
+        return line_img  # no hay líneas
+ 
+    edited = gray.copy()
+    h, w = gray.shape[:2]
+    for (px, py) in points_xy:
+        px = int(np.clip(px, 0, w - 1))
+        py = int(np.clip(py, 0, h - 1))
+        # Buscar el píxel de línea más cercano al clic (por si no cae exacto encima)
+        d2 = (xs - px) ** 2 + (ys - py) ** 2
+        idx = int(np.argmin(d2))
+        # Solo borrar si el clic está razonablemente cerca de una línea
+        if d2[idx] <= (tolerance * max(h, w) / 100.0) ** 2 or d2[idx] <= tolerance ** 2:
+            lbl = labels[ys[idx], xs[idx]]
+            if lbl != 0:
+                edited[labels == lbl] = 255
+    return edited
     if len(line_img.shape) == 2:
         rgb = cv2.cvtColor(line_img, cv2.COLOR_GRAY2RGB)
     else:
         rgb = line_img
- 
     if upscale > 1:
-        rgb = cv2.resize(
-            rgb, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC
-        )
- 
+        rgb = cv2.resize(rgb, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
     pil_img = Image.fromarray(rgb)
     buf = io.BytesIO()
     pil_img.save(buf, format="PNG")
-    img_bytes = buf.getvalue()
- 
-    svg_str = vtracer.convert_raw_image_to_svg(
-        img_bytes,
-        img_format="png",
-        colormode=colormode,
-        mode=mode,
+    return vtracer.convert_raw_image_to_svg(
+        buf.getvalue(), img_format="png",
+        colormode=colormode, mode=mode,
         filter_speckle=int(filter_speckle),
         corner_threshold=int(corner_threshold),
         path_precision=int(path_precision),
         length_threshold=float(length_threshold),
     )
-    return svg_str
  
  
-# ---------- Interfaz ----------
+# ============================================================
+#   BARRA LATERAL IZQUIERDA = TODAS LAS HERRAMIENTAS
+# ============================================================
  
-uploaded_file = st.file_uploader("Sube tu imagen", type=["png", "jpg", "jpeg", "webp"])
+with st.sidebar:
+    st.header("🛠️ Herramientas")
  
-st.subheader("🎨 Preprocesamiento")
-convertir_fondo_negro = st.checkbox(
-    "Convertir fondo negro a blanco (antes de procesar)", value=False
-)
+    uploaded_file = st.file_uploader(
+        "1) Sube tu imagen", type=["png", "jpg", "jpeg", "webp"]
+    )
  
-if convertir_fondo_negro:
-    col_p1, col_p2 = st.columns(2)
-    with col_p1:
+    # ---------- PASO 2: Limpiar el fondo ----------
+    st.markdown("### 2) Limpiar el fondo")
+    st.caption("Sirve para quitar lo que está detrás de tu figura y dejarlo blanco.")
+ 
+    metodo_fondo = st.radio(
+        "¿Cómo quieres limpiar el fondo?",
+        ["No tocar el fondo", "Quitar fondo con IA (recomendado)", "Fondo oscuro → blanco"],
+        help=(
+            "• No tocar: deja la imagen tal cual.\n"
+            "• Quitar fondo con IA: un modelo inteligente reconoce tu figura "
+            "y borra todo lo de atrás automáticamente (lo mejor si el fondo es complicado).\n"
+            "• Fondo oscuro → blanco: convierte simplemente los tonos negros en blanco "
+            "(rápido, ideal si el fondo ya es negro plano)."
+        )
+    )
+ 
+    if metodo_fondo == "Quitar fondo con IA (recomendado)":
+        if not REMBG_OK:
+            st.warning("Falta instalar 'rembg' (agrégalo a requirements.txt).")
+        else:
+            st.caption("💡 La primera vez tarda un poco porque descarga el modelo de IA.")
+    elif metodo_fondo == "Fondo oscuro → blanco":
         umbral_negro = st.slider(
-            "Sensibilidad de negro (más alto = detecta más tonos oscuros)",
-            0, 150, 30
+            "Qué tan oscuro cuenta como fondo", 0, 150, 30,
+            help="Súbelo si quedan restos grises del fondo; bájalo si borra partes de tu figura."
         )
-    with col_p2:
         suavizado_borde = st.slider(
-            "Suavizar borde de transición (0 = corte duro)", 0, 21, 0, step=1
+            "Suavizar el borde", 0, 21, 0, step=1,
+            help="Evita que el corte del fondo se vea duro alrededor de la figura."
         )
  
-col_a, col_b = st.columns(2)
+    st.divider()
  
-with col_a:
+    # ---------- PASO 3: Convertir a líneas ----------
+    st.markdown("### 3) Convertir a líneas")
+    st.caption("Elige el 'estilo' de dibujo con el que se dibujarán las líneas.")
+ 
     metodo = st.selectbox(
-        "Método de conversión",
+        "Estilo de líneas",
         [
-            "Boceto a lápiz (Dodge Blend)",
-            "Bordes Canny",
-            "Umbral Adaptativo",
-            "XDoG (estilo artístico/tattoo)"
-        ]
+            "Estilo tatuaje/logo (XDoG)",
+            "Estilo libro para colorear (grueso)",
+            "Contornos definidos (Canny)",
+            "Dibujo a lápiz (con sombras)",
+        ],
+        help=(
+            "• Tatuaje/logo: líneas limpias y artísticas (lo mejor para diseños como logos).\n"
+            "• Libro para colorear: líneas gruesas y espacios blancos amplios.\n"
+            "• Contornos: solo los bordes principales, bien marcados.\n"
+            "• A lápiz: conserva sombreado, parece dibujo hecho a mano."
+        )
     )
  
-with col_b:
-    invertir_fondo = st.checkbox("Fondo negro / líneas blancas (como logo tattoo)", value=False)
+    with st.expander("Ajustes finos del estilo"):
+        if metodo == "Dibujo a lápiz (con sombras)":
+            blur_ksize = st.slider("Suavizado", 3, 51, 21, step=2,
+                help="Más alto = dibujo más suave y con menos detalle.")
+        elif metodo == "Contornos definidos (Canny)":
+            low_t = st.slider("Sensibilidad de bordes (mín.)", 0, 255, 50,
+                help="Más bajo = detecta más bordes (más líneas).")
+            high_t = st.slider("Sensibilidad de bordes (máx.)", 0, 255, 150,
+                help="Más alto = solo bordes muy marcados.")
+            blur_ksize = st.slider("Suavizado previo", 1, 15, 5, step=2)
+        elif metodo == "Estilo libro para colorear (grueso)":
+            block_size = st.slider("Tamaño de detalle", 3, 51, 9, step=2,
+                help="Más alto = líneas más grandes y menos detalle fino.")
+            c_value = st.slider("Intensidad de líneas", -20, 20, 7)
+            blur_ksize = st.slider("Suavizado", 1, 15, 5, step=2)
+        else:  # XDoG
+            sigma = st.slider("Grosor base de línea", 0.1, 3.0, 0.5,
+                help="Controla qué tan gruesas salen las líneas.")
+            k = st.slider("Detalle", 1.0, 3.0, 1.6)
+            gamma = st.slider("Contraste", 0.8, 1.2, 0.98)
+            epsilon = st.slider("Umbral de líneas", 0.0, 1.0, 0.1)
+            phi = st.slider("Dureza del trazo", 1, 50, 10)
  
-st.subheader("Parámetros")
+        grosor_extra = st.slider("Reforzar líneas", 0.0, 2.0, 0.5, step=0.1,
+            help="Oscurece y marca más las líneas resultantes.")
  
-if metodo == "Boceto a lápiz (Dodge Blend)":
-    blur_ksize = st.slider("Suavizado (impar)", 3, 51, 21, step=2)
-elif metodo == "Bordes Canny":
-    low_t = st.slider("Umbral bajo", 0, 255, 50)
-    high_t = st.slider("Umbral alto", 0, 255, 150)
-    blur_ksize = st.slider("Suavizado previo (impar)", 1, 15, 5, step=2)
-elif metodo == "Umbral Adaptativo":
-    block_size = st.slider("Tamaño de bloque (impar)", 3, 51, 9, step=2)
-    c_value = st.slider("Constante C", -20, 20, 7)
-    blur_ksize = st.slider("Mediana blur (impar)", 1, 15, 5, step=2)
-else:  # XDoG
-    sigma = st.slider("Sigma", 0.1, 3.0, 0.5)
-    k = st.slider("k (multiplicador sigma)", 1.0, 3.0, 1.6)
-    gamma = st.slider("Gamma", 0.8, 1.2, 0.98)
-    epsilon = st.slider("Epsilon", 0.0, 1.0, 0.1)
-    phi = st.slider("Phi (contraste de línea)", 1, 50, 10)
+    st.divider()
  
-grosor_extra = st.slider("Reforzar contraste de líneas", 0.0, 2.0, 0.5, step=0.1)
+    # ---------- PASO 4: Modo nítido ----------
+    st.markdown("### 4) Limpieza final")
+    st.caption("Deja las líneas 100% negras sobre blanco y borra los puntitos sueltos.")
  
-st.markdown("---")
-st.subheader("✨ Modo Nítido (blanco y negro puro, sin ruido)")
-st.caption(
-    "Actívalo si tu resultado sale grisáceo/con textura. Convierte todo a blanco "
-    "o negro puro y elimina las manchitas sueltas, como en un dibujo para colorear limpio."
-)
+    modo_nitido = st.checkbox("Activar limpieza nítida", value=True,
+        help="Recomendado. Convierte todo a blanco y negro puro, sin grises ni manchas.")
  
-modo_nitido = st.checkbox("Activar modo nítido", value=True)
+    if modo_nitido:
+        with st.expander("Ajustes de limpieza"):
+            bin_threshold = st.slider("Punto de corte blanco/negro", 0, 255, 180,
+                help="Más alto = líneas más finas; más bajo = líneas más gruesas.")
+            remove_specks = st.checkbox("Borrar manchas de ruido", value=True)
+            min_speck_size = st.slider("Tamaño mínimo de mancha", 1, 200, 15,
+                help="Súbelo para borrar más puntitos sueltos del fondo.")
+            close_gaps = st.checkbox("Unir líneas cortadas", value=True)
+            close_ksize = st.slider("Fuerza de unión", 1, 7, 2)
  
-if modo_nitido:
-    col_n1, col_n2 = st.columns(2)
-    with col_n1:
-        bin_threshold = st.slider(
-            "Umbral blanco/negro (más alto = líneas más finas/estrictas)",
-            0, 255, 180
-        )
-        remove_specks = st.checkbox("Eliminar manchas/puntitos de ruido", value=True)
-    with col_n2:
-        min_speck_size = st.slider(
-            "Tamaño mínimo de mancha a conservar (px)", 1, 200, 15
-        )
-        close_gaps = st.checkbox("Cerrar micro-huecos en las líneas", value=True)
-    close_ksize = st.slider("Grosor de cierre de huecos", 1, 7, 2)
+    st.divider()
  
-st.markdown("---")
-st.subheader("🔷 Vectorización avanzada (SVG)")
-st.caption(
-    "Convierte las líneas en trazos vectoriales que escalan sin pixelarse. "
-    "Ideal para imprimir en grande, tatuajes, corte láser/vinilo o editar en Illustrator/Inkscape."
-)
- 
-if not VTRACER_OK:
-    st.warning(
-        "La librería 'vtracer' no está instalada. Agrega `vtracer` a tu "
-        "requirements.txt para habilitar la vectorización SVG."
+    # ---------- PASO 5: Edición manual ----------
+    st.markdown("### 5) Edición manual (borrar a mano)")
+    st.caption(
+        "Corrige el resultado borrando líneas o zonas que no quieres. "
+        "Puedes acercar la imagen (zoom) para trabajar con precisión."
     )
-    vectorizar = False
+ 
+    if not CANVAS_OK:
+        st.warning("Falta instalar 'streamlit-drawable-canvas' (agrégalo a requirements.txt).")
+        edicion_manual = False
+    else:
+        edicion_manual = st.checkbox("Activar edición manual", value=False)
+ 
+    if CANVAS_OK and edicion_manual:
+        modo_borrado = st.radio(
+            "¿Cómo quieres borrar?",
+            ["Brocha (pintar encima)", "Borrar trazo con un clic", "Borrar zona (rectángulo)"],
+            help=(
+                "• Brocha: pintas con el mouse encima de lo que quieras borrar "
+                "(como un borrador). Ajusta el grosor abajo.\n"
+                "• Borrar trazo con un clic: haces clic sobre una línea y se borra "
+                "esa línea completa de una vez.\n"
+                "• Borrar zona: dibujas un rectángulo y se borra todo lo que quede dentro."
+            )
+        )
+        zoom = st.slider(
+            "🔍 Zoom (acercar imagen)", 0.5, 3.0, 1.0, step=0.1,
+            help="Agranda la imagen en pantalla para poder borrar con más precisión."
+        )
+        if modo_borrado == "Brocha (pintar encima)":
+            grosor_borrador = st.slider("Grosor del borrador", 3, 60, 20)
+        st.caption(
+            "↩️ Usa los íconos debajo del lienzo para deshacer, rehacer o limpiar todo."
+        )
+ 
+    st.divider()
+ 
+    # ---------- PASO 6: Vectorizar ----------
+    st.markdown("### 6) Vectorizar (opcional)")
+    st.caption(
+        "Convierte el dibujo en un archivo que se puede agrandar infinitamente "
+        "sin que se vea pixelado. Ideal para imprimir grande o cortar en vinilo."
+    )
+ 
+    if not VTRACER_OK:
+        st.warning("Falta instalar 'vtracer' (agrégalo a requirements.txt).")
+        vectorizar = False
+    else:
+        vectorizar = st.checkbox("Generar archivo vectorial (SVG)", value=False)
+ 
+    if VTRACER_OK and vectorizar:
+        with st.expander("Ajustes del vector"):
+            v_colormode = st.selectbox("¿Blanco y negro o a color?", ["binary", "color"],
+                format_func=lambda x: "Blanco y negro" if x == "binary" else "A color",
+                help="Blanco y negro para líneas; a color si quieres conservar los colores.")
+            v_mode = st.selectbox("Tipo de trazo", ["spline", "polygon", "none"],
+                format_func=lambda x: {"spline": "Curvas suaves", "polygon": "Líneas rectas",
+                                       "none": "Pixelado"}[x])
+            v_upscale = st.slider("Mejorar detalle antes de vectorizar", 1, 4, 2,
+                help="Amplía la imagen antes de trazar para capturar detalles finos.")
+            v_filter_speckle = st.slider("Quitar manchas pequeñas", 0, 30, 4)
+            v_corner_threshold = st.slider("Suavidad de esquinas", 0, 180, 60)
+            v_length_threshold = st.slider("Ignorar trazos cortos", 0.0, 10.0, 4.0, step=0.5)
+ 
+ 
+# ============================================================
+#   ÁREA PRINCIPAL DERECHA = IMÁGENES / RESULTADO
+# ============================================================
+ 
+if uploaded_file is None:
+    st.info("👈 Sube una imagen en la barra lateral para comenzar.")
+    st.markdown(
+        "**Guía rápida:**\n"
+        "1. Sube tu imagen.\n"
+        "2. Limpia el fondo (la IA es la opción más cómoda).\n"
+        "3. Elige el estilo de líneas.\n"
+        "4. Deja la limpieza nítida activada.\n"
+        "5. Si quieres, borra a mano líneas o zonas que no te gusten (con zoom y clic).\n"
+        "6. Si quieres un archivo escalable, activa la vectorización.\n\n"
+        "Los resultados aparecerán aquí a la derecha y podrás descargarlos."
+    )
 else:
-    vectorizar = st.checkbox("Generar versión vectorial (SVG)", value=False)
- 
-if VTRACER_OK and vectorizar:
-    col_v1, col_v2 = st.columns(2)
-    with col_v1:
-        v_colormode = st.selectbox(
-            "Modo de color",
-            ["binary", "color"],
-            help="'binary' = blanco y negro (líneas). 'color' = conserva colores."
-        )
-        v_mode = st.selectbox(
-            "Estilo de trazo",
-            ["spline", "polygon", "none"],
-            help="'spline' = curvas suaves (recomendado). 'polygon' = rectas. 'none' = pixelado."
-        )
-        v_upscale = st.slider(
-            "Ampliar antes de vectorizar (mejora detalle)", 1, 4, 2,
-            help="Amplía la imagen antes de trazar; captura mejor los detalles finos."
-        )
-    with col_v2:
-        v_filter_speckle = st.slider(
-            "Filtrar manchas pequeñas", 0, 30, 4,
-            help="Elimina puntitos/ruido menores a este tamaño."
-        )
-        v_corner_threshold = st.slider(
-            "Suavidad de esquinas", 0, 180, 60,
-            help="Más alto = curvas más suaves; más bajo = esquinas más marcadas."
-        )
-        v_length_threshold = st.slider(
-            "Descartar trazos muy cortos", 0.0, 10.0, 4.0, step=0.5
-        )
- 
-if uploaded_file is not None:
     pil_img = Image.open(uploaded_file).convert("RGB")
     img_np = np.array(pil_img)
     img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
  
-    if convertir_fondo_negro:
-        img_bgr = black_bg_to_white(img_bgr, threshold=umbral_negro, feather=suavizado_borde)
+    # Paso 2: fondo
+    with st.spinner("Preparando la imagen..."):
+        if metodo_fondo == "Quitar fondo con IA (recomendado)" and REMBG_OK:
+            img_bgr = ai_remove_background(img_bgr)
+        elif metodo_fondo == "Fondo oscuro → blanco":
+            img_bgr = black_bg_to_white(img_bgr, threshold=umbral_negro, feather=suavizado_borde)
  
-    with st.spinner("Procesando imagen..."):
-        if metodo == "Boceto a lápiz (Dodge Blend)":
+    # Paso 3: líneas
+    with st.spinner("Dibujando las líneas..."):
+        if metodo == "Dibujo a lápiz (con sombras)":
             result = pencil_sketch(img_bgr, blur_ksize=blur_ksize)
-        elif metodo == "Bordes Canny":
+        elif metodo == "Contornos definidos (Canny)":
             result = canny_lines(img_bgr, low_t, high_t, blur_ksize)
-        elif metodo == "Umbral Adaptativo":
+        elif metodo == "Estilo libro para colorear (grueso)":
             result = adaptive_threshold_lines(img_bgr, block_size, c_value, blur_ksize)
         else:
             result = xdog_lines(img_bgr, sigma, k, gamma, epsilon, phi)
@@ -324,86 +407,134 @@ if uploaded_file is not None:
         if grosor_extra > 0:
             result = sharpen_lines(result, grosor_extra)
  
+        # Paso 4: nítido
         if modo_nitido:
             result = clean_sharp_lines(
-                result,
-                bin_threshold=bin_threshold,
-                remove_specks=remove_specks,
-                min_speck_size=min_speck_size,
-                close_gaps=close_gaps,
-                close_ksize=close_ksize
+                result, bin_threshold=bin_threshold, remove_specks=remove_specks,
+                min_speck_size=min_speck_size, close_gaps=close_gaps, close_ksize=close_ksize
             )
  
-        if invertir_fondo:
-            result = 255 - result
- 
+    # Mostrar original vs resultado
     col1, col2 = st.columns(2)
     with col1:
         preview_img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        caption_original = (
-            "Imagen con fondo convertido a blanco" if convertir_fondo_negro
-            else "Imagen original"
-        )
-        st.image(preview_img, caption=caption_original, width="stretch")
+        cap = ("Imagen preparada" if metodo_fondo != "No tocar el fondo" else "Imagen original")
+        st.image(preview_img, caption=cap, width="stretch")
     with col2:
-        st.image(result, caption="Resultado en líneas", width="stretch", clamp=True)
+        st.image(result, caption="Dibujo de líneas", width="stretch", clamp=True)
  
-    # Preparar descarga PNG
+    # ---------- Paso 5: Edición manual con lienzo interactivo ----------
+    if CANVAS_OK and edicion_manual:
+        st.divider()
+        st.subheader("✏️ Edición manual")
+        st.caption(
+            "Trabaja sobre el lienzo de abajo. Lo que borres aquí se usará también "
+            "para la descarga y el vector."
+        )
+ 
+        # Preparar imagen base en RGB para el lienzo
+        if len(result.shape) == 2:
+            base_rgb = cv2.cvtColor(result, cv2.COLOR_GRAY2RGB)
+        else:
+            base_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
+        h0, w0 = base_rgb.shape[:2]
+ 
+        # Tamaño de visualización según zoom (con un límite para no saturar)
+        base_fit = min(w0, 700)
+        disp_w = int(min(base_fit * zoom, 1400))
+        disp_h = int(disp_w * h0 / w0)
+        base_disp = cv2.resize(base_rgb, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
+        base_pil = Image.fromarray(base_disp)
+ 
+        # Configurar el modo del lienzo
+        if modo_borrado == "Brocha (pintar encima)":
+            drawing_mode = "freedraw"
+            stroke_w = grosor_borrador
+        elif modo_borrado == "Borrar zona (rectángulo)":
+            drawing_mode = "rect"
+            stroke_w = 2
+        else:  # Borrar trazo con un clic
+            drawing_mode = "point"
+            stroke_w = 3
+ 
+        canvas_result = st_canvas(
+            fill_color="rgba(255,255,255,1)",   # blanco = borrar
+            stroke_color="rgba(255,255,255,1)", # blanco
+            stroke_width=stroke_w,
+            background_image=base_pil,
+            update_streamlit=True,
+            height=disp_h,
+            width=disp_w,
+            drawing_mode=drawing_mode,
+            point_display_radius=4 if drawing_mode == "point" else 0,
+            display_toolbar=True,
+            key="lienzo_edicion",
+        )
+ 
+        # Aplicar el borrado sobre el resultado a resolución completa
+        edited = result.copy()
+        scale_x = w0 / disp_w
+        scale_y = h0 / disp_h
+ 
+        if drawing_mode == "point":
+            # Borrar trazos completos en cada punto donde se hizo clic
+            puntos = []
+            if canvas_result.json_data is not None:
+                for obj in canvas_result.json_data.get("objects", []):
+                    left = obj.get("left", 0)
+                    top = obj.get("top", 0)
+                    radius = obj.get("radius", 0)
+                    cx = (left + radius) * scale_x
+                    cy = (top + radius) * scale_y
+                    puntos.append((cx, cy))
+            if puntos:
+                edited = erase_strokes_at_points(edited, puntos)
+        else:
+            # Brocha o rectángulo: usar lo pintado como máscara de borrado
+            if canvas_result.image_data is not None:
+                overlay = canvas_result.image_data  # RGBA en tamaño de display
+                alpha = overlay[:, :, 3]
+                mask = (alpha > 0).astype(np.uint8) * 255
+                mask_full = cv2.resize(mask, (w0, h0), interpolation=cv2.INTER_NEAREST)
+                if len(edited.shape) == 2:
+                    edited[mask_full > 0] = 255
+                else:
+                    edited[mask_full > 0] = (255, 255, 255)
+ 
+        result = edited  # todo lo de abajo usa la versión editada
+ 
+        st.image(result, caption="Resultado editado", width="stretch", clamp=True)
+ 
+    st.divider()
+    # Descargar PNG
     result_pil = Image.fromarray(result)
     buf = io.BytesIO()
     result_pil.save(buf, format="PNG")
-    byte_im = buf.getvalue()
+    st.download_button("⬇️ Descargar dibujo (PNG)", data=buf.getvalue(),
+                       file_name="imagen_lineas.png", mime="image/png")
  
-    st.download_button(
-        label="⬇️ Descargar imagen de líneas (PNG)",
-        data=byte_im,
-        file_name="imagen_lineas.png",
-        mime="image/png"
-    )
- 
-    # ---------- Vectorización SVG ----------
+    # Paso 5: SVG
     if VTRACER_OK and vectorizar:
-        st.markdown("### 🔷 Resultado vectorial (SVG)")
+        st.divider()
+        st.subheader("🔷 Versión vectorial (SVG)")
         with st.spinner("Vectorizando... (puede tardar unos segundos)"):
             try:
-                # Para modo color se vectoriza la imagen a color; para binario, las líneas
                 if v_colormode == "color":
                     source_for_vector = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
                 else:
                     source_for_vector = result
- 
                 svg_str = vectorize_to_svg(
-                    source_for_vector,
-                    colormode=v_colormode,
-                    mode=v_mode,
-                    filter_speckle=v_filter_speckle,
-                    corner_threshold=v_corner_threshold,
-                    length_threshold=v_length_threshold,
-                    upscale=v_upscale,
+                    source_for_vector, colormode=v_colormode, mode=v_mode,
+                    filter_speckle=v_filter_speckle, corner_threshold=v_corner_threshold,
+                    length_threshold=v_length_threshold, upscale=v_upscale,
                 )
- 
-                # Vista previa del SVG dentro de un contenedor
                 st.components.v1.html(
-                    f'<div style="background:white; padding:10px; border-radius:8px;">{svg_str}</div>',
-                    height=520,
-                    scrolling=True,
+                    f'<div style="background:white;padding:10px;border-radius:8px;">{svg_str}</div>',
+                    height=520, scrolling=True,
                 )
- 
-                st.download_button(
-                    label="⬇️ Descargar vector (SVG)",
-                    data=svg_str.encode("utf-8"),
-                    file_name="imagen_vectorizada.svg",
-                    mime="image/svg+xml"
-                )
+                st.download_button("⬇️ Descargar vector (SVG)",
+                                   data=svg_str.encode("utf-8"),
+                                   file_name="imagen_vectorizada.svg",
+                                   mime="image/svg+xml")
             except Exception as e:
                 st.error(f"No se pudo vectorizar: {e}")
-else:
-    st.info("Sube una imagen para comenzar (JPG, PNG o WEBP).")
- 
-st.markdown("---")
-st.caption(
-    "Tip: 'XDoG' suele dar el look más parecido a un diseño de logo/tatuaje en línea "
-    "(como el de tu dragón emplumado). 'Umbral Adaptativo' funciona bien para líneas "
-    "gruesas tipo libro para colorear."
-)
- 
